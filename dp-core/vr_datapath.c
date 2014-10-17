@@ -42,7 +42,7 @@ vr_arp_request_treatment(struct vr_interface *vif, struct vr_arp *arp,
     /*
      * Packet from VM :
      *       - If no source address DROP
-     *       - If L3 route exists PROXY
+     *       - If L3 route exists (VR_ETH_PROTO_VLAN)ROXY
      *       - If no L3 route FLOOD
      *       - If no route DROP
      *       - If GRAT ARP, ideally should be flooded to hosts behind TOR
@@ -64,7 +64,7 @@ vr_arp_request_treatment(struct vr_interface *vif, struct vr_arp *arp,
         return PKT_ARP_XCONNECT;
 
 
-    if (vif->vif_type == VIF_TYPE_VIRTUAL)
+    if (vif_is_virtual(vif))
         /*
          * some OSes send arp queries with zero SIP before taking ownership
          * of the DIP
@@ -106,7 +106,7 @@ vr_arp_request_treatment(struct vr_interface *vif, struct vr_arp *arp,
     /*
      * If an L3VPN route is learnt, we need to proxy
      */
-    if (vif->vif_type == VIF_TYPE_VIRTUAL) {
+    if (vif_is_virtual(vif)) {
         if (nh->nh_type == NH_TUNNEL)
             return PKT_ARP_PROXY;
         /*
@@ -145,6 +145,7 @@ vr_handle_arp_request(unsigned short vrf, struct vr_arp *sarp,
 
     switch (arp_result) {
     case PKT_ARP_PROXY:
+
         pkt_reset(pkt);
 
         eth = (struct vr_eth *)pkt_data(pkt);
@@ -162,7 +163,7 @@ vr_handle_arp_request(unsigned short vrf, struct vr_arp *sarp,
         }
         memcpy(eth_proto, &proto, sizeof(proto));
 
-        arp = (struct vr_arp *)pkt_pull_tail(pkt, VR_ETHER_HLEN);
+        arp = (struct vr_arp *)pkt_pull_tail(pkt, pull_tail_len);
 
         sarp->arp_op = htons(VR_ARP_OP_REPLY);
         memcpy(sarp->arp_sha, vif->vif_mac, VR_ETHER_ALEN);
@@ -284,7 +285,7 @@ vr_arp_input(unsigned short vrf, struct vr_packet *pkt,
 
     case VR_ARP_OP_REPLY:
         /* ARP reply from virual interface need not be processed */
-        if (pkt->vp_if->vif_type == VIF_TYPE_VIRTUAL)
+        if (vif_is_virtual(pkt->vp_if))
             return 0;
         vr_handle_arp_reply(vrf, &sarp, pkt, fmd);
         break;
@@ -318,10 +319,14 @@ vr_trap(struct vr_packet *pkt, unsigned short trap_vrf,
 }
 
 static inline bool
-vr_my_mac(unsigned char *pkt_mac, struct vr_interface *vif)
+vr_my_pkt(unsigned char *pkt_mac, struct vr_interface *vif)
 {
-
-    if (VR_MAC_CMP(pkt_mac, vif->vif_mac))
+    /*
+     * Packet is destined to us if:
+     * 1) IF destination MAC is our Mac
+     * 2) If VIF is service interface
+     */
+    if (VR_MAC_CMP(pkt_mac, vif->vif_mac) || vif_is_service(vif))
         return true;
 
     return false;
@@ -355,7 +360,7 @@ vr_virtual_input(unsigned short vrf, struct vr_interface *vif,
     }
 
     pull_len = pkt_get_network_header_off(pkt) - pkt_head_space(pkt);
-    if (vr_my_mac(data, vif)) {
+    if (vr_my_pkt(data, vif)) {
         pkt_pull(pkt, pull_len);
         handled = vr_l3_input(vrf, pkt, &fmd);
         if (handled)
@@ -406,7 +411,7 @@ vr_l3_input(unsigned short vrf, struct vr_packet *pkt,
     if (pkt->vp_type == VP_TYPE_IP) {
         pkt_set_inner_network_header(pkt, pkt->vp_data);
         if (vr_from_vm_mss_adj && vr_pkt_from_vm_tcp_mss_adj &&
-            (vif->vif_type == VIF_TYPE_VIRTUAL)) {
+            vif_is_virtual(vif)) {
             if ((reason = vr_pkt_from_vm_tcp_mss_adj(pkt, VROUTER_OVERLAY_LEN))) {
                 vr_pfree(pkt, reason);
                 return 1;
@@ -417,7 +422,7 @@ vr_l3_input(unsigned short vrf, struct vr_packet *pkt,
     } else if (pkt->vp_type == VP_TYPE_IP6) {
         pkt_set_inner_network_header(pkt, pkt->vp_data);
         if (vr_from_vm_mss_adj && vr_pkt_from_vm_tcp_mss_adj &&
-            (vif->vif_type == VIF_TYPE_VIRTUAL)) {
+            vif_is_virtual(vif)) {
             if ((reason = vr_pkt_from_vm_tcp_mss_adj(pkt, VROUTER_OVERLAY_LEN))) {
                 vr_pfree(pkt, reason);
                 return 1;
@@ -439,11 +444,16 @@ vr_l2_input(unsigned short vrf, struct vr_packet *pkt,
     int reason;
     struct vr_interface *vif = pkt->vp_if;
 
-    if (IS_MAC_BMCAST(pkt_data(pkt)) &&
-        (vif->vif_flags & VIF_FLAG_L3_ENABLED)) {
-        if (pkt->vp_type == VP_TYPE_ARP || vr_l3_well_known_packet(vrf, pkt))
-            if (vr_l3_input(vrf, pkt, fmd))
-                return 1;
+    /* Only non-vlan tagged are L3 packets */
+    if (fmd->fmd_vlan == VLAN_ID_INVALID) {
+        if (IS_MAC_BMCAST(pkt_data(pkt)) &&
+                (vif->vif_flags & VIF_FLAG_L3_ENABLED)) {
+            if (pkt->vp_type == VP_TYPE_ARP || 
+                    vr_l3_well_known_packet(vrf, pkt)) {
+                if (vr_l3_input(vrf, pkt, fmd))
+                    return 1;
+            }
+        }
     }
 
     if (!(vif->vif_flags & VIF_FLAG_L2_ENABLED))
@@ -465,7 +475,7 @@ vr_l2_input(unsigned short vrf, struct vr_packet *pkt,
         pkt_set_network_header(pkt, pkt->vp_data);
         pkt_set_inner_network_header(pkt, pkt->vp_data);
         if (vr_from_vm_mss_adj && vr_pkt_from_vm_tcp_mss_adj &&
-                            (pkt->vp_if->vif_type == VIF_TYPE_VIRTUAL)) {
+                            vif_is_virtual(vif)) {
             if ((reason = vr_pkt_from_vm_tcp_mss_adj(pkt, VROUTER_OVERLAY_LEN_IN_L2_MODE))) {
                 vr_pfree(pkt, reason);
                 return 1;
@@ -495,7 +505,7 @@ vr_l3_well_known_packet(unsigned short vrf, struct vr_packet *pkt)
     unsigned char *l3_hdr;
 
     l3_hdr = pkt_network_header(pkt);
-    if (pkt->vp_if->vif_type == VIF_TYPE_VIRTUAL && IS_MAC_BMCAST(data)) {
+    if (vif_is_virtual(pkt->vp_if) && IS_MAC_BMCAST(data)) {
         iph = (struct vr_ip *)l3_hdr;
         if (!vr_ip_is_ip6(iph)) {
             if ((iph->ip_proto == VR_IP_PROTO_UDP) &&
@@ -522,8 +532,7 @@ vr_trap_l2_well_known_packets(unsigned short vrf, struct vr_packet *pkt,
                               struct vr_forwarding_md *fmd)
 {
 
-    if (pkt->vp_if->vif_type == VIF_TYPE_VIRTUAL && 
-                          well_known_mac(pkt_data(pkt))) {
+    if (vif_is_virtual(pkt->vp_if) && well_known_mac(pkt_data(pkt))) {
         vr_trap(pkt, vrf,  AGENT_TRAP_L2_PROTOCOLS, NULL);
         return 1;   
     }

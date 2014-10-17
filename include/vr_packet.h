@@ -36,6 +36,8 @@
 /* Size of GRE header with key */
 #define VR_GRE_KEY_HDR_LEN      8
 
+#define VR_DYNAMIC_PORT_START   32768
+#define VR_DYNAMIC_PORT_END     65535
 
 /*
  * Overlay length used for TCP MSS adjust. For UDP outer header, overlay
@@ -81,14 +83,15 @@
 #define VP_TYPE_VXLAN           6
 #define VP_TYPE_AGENT           7
 #define VP_TYPE_ARP             8
-#define VP_TYPE_MAX             9
+#define VP_TYPE_IP6OIP          9
+#define VP_TYPE_MAX             10
 
 /*
  * Values to define how to proceed with handling a packet.
  */
-#define PKT_RET_FAST_PATH 			1
-#define PKT_RET_SLOW_PATH 			2
-#define PKT_RET_ERROR     			3
+#define PKT_RET_FAST_PATH           1
+#define PKT_RET_SLOW_PATH           2
+#define PKT_RET_ERROR               3
 
 /*
  * Values to define the MPLS tunnel type
@@ -392,8 +395,18 @@ static inline bool
 vr_pkt_is_ip(struct vr_packet *pkt)
 {
     if (pkt->vp_type == VP_TYPE_IPOIP || pkt->vp_type == VP_TYPE_IP ||
-                pkt->vp_type == VP_TYPE_L2 || pkt->vp_type == VP_TYPE_L2OIP ||
-                pkt->vp_type == VP_TYPE_VXLAN)
+              pkt->vp_type == VP_TYPE_L2 || pkt->vp_type == VP_TYPE_L2OIP ||
+              pkt->vp_type == VP_TYPE_VXLAN || pkt->vp_type == VP_TYPE_IP6OIP)
+        return true;
+
+    return false;
+}
+
+static inline bool
+vr_pkt_type_is_overlay(unsigned short type)
+{
+    if (type == VP_TYPE_IPOIP || type == VP_TYPE_L2OIP ||
+              type == VP_TYPE_VXLAN || type == VP_TYPE_IP6OIP)
         return true;
 
     return false;
@@ -716,7 +729,7 @@ static inline unsigned char *
 pkt_push(struct vr_packet *pkt, unsigned int len)
 {
     if (len > pkt->vp_data)
-	    return NULL;
+        return NULL;
 
     pkt->vp_data -= len;
     pkt->vp_len += len;

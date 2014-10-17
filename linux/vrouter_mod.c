@@ -772,7 +772,7 @@ static int
 lh_pkt_from_vm_tcp_mss_adj(struct vr_packet *pkt, unsigned short overlay_len)
 {
     struct sk_buff *skb = vp_os_packet(pkt);
-    int hlen, pull_len, proto;
+    int hlen, pull_len, proto, opt_len = 0;
     struct vr_ip *iph;
     struct vr_ip6 *ip6h;
     struct tcphdr *tcph;
@@ -785,10 +785,23 @@ lh_pkt_from_vm_tcp_mss_adj(struct vr_packet *pkt, unsigned short overlay_len)
 
     pull_len = pkt->vp_data - (skb_headroom(skb));
 
+    /* Pull in ipv4 header-length */
+    pull_len += sizeof(struct vr_ip);
+
+    if (!pskb_may_pull(skb, pull_len)) {
+        return VP_DROP_PULL; 
+    }
+
+    iph = (struct vr_ip *) (skb->head + pkt->vp_data);
+
     if (vr_ip_is_ip6(iph)) {
 
-        ip6h = (struct vr_ip6 *)iph;
-        pull_len += sizeof(struct vr_ip6);
+        pull_len += (sizeof(struct vr_ip6) - sizeof(struct vr_ip));
+        if (!pskb_may_pull(skb, pull_len)) {
+            return VP_DROP_PULL;
+        }
+
+        ip6h = (struct vr_ip6 *) (skb->head + pkt->vp_data);
         proto = ip6h->ip6_nxt;
         hlen = sizeof(struct vr_ip6);
     } else {
@@ -799,20 +812,17 @@ lh_pkt_from_vm_tcp_mss_adj(struct vr_packet *pkt, unsigned short overlay_len)
             goto out;
         }
 
-        pull_len += sizeof(struct vr_ip);
         proto = iph->ip_proto;
         hlen = iph->ip_hl * 4;
+        opt_len = hlen - sizeof(struct vr_ip);
     }
 
-    if (!pskb_may_pull(skb, pull_len)) {
-        return VP_DROP_PULL; 
-    }
 
     if (proto != VR_IP_PROTO_TCP) {
         goto out;
     }
 
-    pull_len += sizeof(struct tcphdr);
+    pull_len += sizeof(struct tcphdr) + opt_len;
 
     if (!pskb_may_pull(skb, pull_len)) {
         return VP_DROP_PULL;
@@ -832,6 +842,9 @@ lh_pkt_from_vm_tcp_mss_adj(struct vr_packet *pkt, unsigned short overlay_len)
     if (!pskb_may_pull(skb, pull_len)) {
         return VP_DROP_PULL;
     }
+
+    iph = (struct vr_ip *) (skb->head + pkt->vp_data);
+    tcph = (struct tcphdr *) ((char *) iph +  hlen);
 
     lh_adjust_tcp_mss(tcph, skb, overlay_len, hlen);
 
@@ -1623,6 +1636,21 @@ slow_path:
     return 1;
 }
 
+static int
+lh_pkt_may_pull(struct vr_packet *pkt, unsigned int len)
+{
+    struct sk_buff *skb = vp_os_packet(pkt);
+    unsigned int pull_len;
+
+    pull_len = pkt->vp_data - skb_headroom(skb);
+    pull_len += len;
+    if (!pskb_may_pull(skb, pull_len))
+        return -1;
+
+    lh_reset_skb_fields(pkt);
+    return 0;
+}
+
 /*
  * lh_pull_inner_headers_fast - faster version of lh_pull_inner_headers that
  * avoids multiple calls to pskb_may_pull(). In the common case, this
@@ -2087,6 +2115,7 @@ struct host_os linux_host = {
     .hos_pull_inner_headers_fast    =       lh_pull_inner_headers_fast,
     .hos_get_udp_src_port           =       lh_get_udp_src_port,
     .hos_pkt_from_vm_tcp_mss_adj    =       lh_pkt_from_vm_tcp_mss_adj,
+    .hos_pkt_may_pull               =       lh_pkt_may_pull,
 };
     
 struct host_os *
