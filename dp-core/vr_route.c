@@ -356,12 +356,15 @@ inet_route_add(struct rtable_fspec *fs, struct vr_route_req *req)
            req->rtr_req.rtr_label, req->rtr_req.rtr_nh_id,
            req->rtr_req.rtr_prefix_size);
     */
-    if (req->rtr_req.rtr_family != AF_INET && 
+    /* V4 and V6 only */
+    if (req->rtr_req.rtr_family != AF_INET &&
         req->rtr_req.rtr_family != AF_INET6)
         return -EINVAL;
 
+    /* There has to be some prefix to add */
     if (!req->rtr_req.rtr_prefix_size)
         return -EINVAL;
+
 
     rtable = router->vr_inet_rtable;
     if (!rtable ||
