@@ -35,4 +35,8 @@ int vr_pkt_type(struct vr_packet *);
 bool vr_l3_well_known_packet(unsigned short , struct vr_packet *);
 int vr_trap_l2_well_known_packets(unsigned short , struct vr_packet *,
                                   struct vr_forwarding_md *);
+int vr_tor_input(unsigned short , struct vr_packet *, 
+                 struct vr_forwarding_md *);
+
+
 #endif //__VR_DATAPATH_H__

@@ -31,13 +31,8 @@
 #define AGENT_TRAP_ECMP_RESOLVE     9
 #define AGENT_TRAP_SOURCE_MISMATCH  10
 #define AGENT_TRAP_HANDLE_DF        11
-#define MAX_AGENT_HDR_COMMANDS      12
-
-enum rt_type{
-    RT_UCAST = 0,
-    RT_MCAST,
-    RT_MAX,
-};
+#define AGENT_TRAP_TOR_CONTROL_PKT  12
+#define MAX_AGENT_HDR_COMMANDS      13
 
 #define VR_RT_LABEL_VALID_FLAG      0x1
 #define VR_RT_HOSTED_FLAG           0x2

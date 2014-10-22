@@ -556,7 +556,6 @@ lh_get_udp_src_port(struct vr_packet *pkt, struct vr_forwarding_md *fmd,
 
         if (pkt_head_len(pkt) < ETH_HLEN)
             goto error;
-
         data = (unsigned int *)(skb->head + pkt->vp_data);
         hashval = vr_hash(data, ETH_HLEN, vr_hashrnd);
         /* Include the VRF to calculate the hash */
@@ -1118,6 +1117,12 @@ lh_pull_inner_headers_fast_udp(struct vr_packet *pkt, int
             if (frag_size < pull_len)
                 goto slow_path;
         }
+
+        if (ntohs(eth_proto) == VR_ETH_PROTO_ARP) {
+            pull_len += sizeof(struct arphdr);
+            if (frag_size < pull_len)
+                goto slow_path;
+        }
     }
 
     if (iph) {
@@ -1479,6 +1484,12 @@ lh_pull_inner_headers_fast_gre(struct vr_packet *pkt, int
             if (frag_size < pull_len)
                 goto slow_path;
         }
+
+        if (ntohs(eth_proto) == VR_ETH_PROTO_ARP) {
+            pull_len += sizeof(struct arphdr);
+            if (frag_size < pull_len)
+                goto slow_path;
+        }
     }
 
     if (iph) {
@@ -1834,6 +1845,12 @@ lh_pull_inner_headers(struct vr_packet *pkt,
             if (!pskb_may_pull(skb, pull_len))
                 goto error;
             iph = (struct vr_ip *) (skb->head + hoff);
+        }
+
+        if (ntohs(eth_proto) == VR_ETH_PROTO_ARP) {
+            pull_len += sizeof(struct arphdr);
+            if (!pskb_may_pull(skb, pull_len))
+                goto error;
         }
     }
 
