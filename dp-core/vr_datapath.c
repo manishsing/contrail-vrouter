@@ -113,7 +113,7 @@ vr_arp_request_treatment(struct vr_interface *vif, struct vr_arp *arp,
          * If not l3 vpn route, we default to flooding
          */
         if ((nh->nh_type == NH_COMPOSITE) &&
-                (nh->nh_flags & NH_FLAG_COMPOSITE_EVPN)) {
+                (nh->nh_flags & NH_FLAG_MCAST)) {
             if (ret_nh)
                 *ret_nh = nh;
             return PKT_ARP_FLOOD;

@@ -395,6 +395,46 @@ drop:
     return ret;
 }
 
+
+static int
+nh_composite_validate_fabric_src(unsigned short vrf, struct vr_packet *pkt,
+         struct vr_nexthop *nh, struct vr_forwarding_md *fmd, void *ret_flags)
+{
+    int j;
+    struct vr_nexthop *tunnel_nh;
+    unsigned int tun_dip;
+
+    if (pkt->vp_if->vif_type != VIF_TYPE_PHYSICAL)
+        return NH_SOURCE_INVALID;
+
+    if (!fmd->fmd_outer_src_ip)
+        return NH_SOURCE_INVALID;
+
+    for(j = 0; j < nh->nh_component_cnt; j++) {
+        tunnel_nh = nh->nh_component_nh[j].cnh;
+
+        if (!tunnel_nh || !(tunnel_nh->nh_flags & NH_FLAG_VALID))
+            continue;
+
+        if (tunnel_nh->nh_type != NH_TUNNEL)
+            continue;
+
+        tun_dip = 0;
+        if (tunnel_nh->nh_flags & NH_FLAG_TUNNEL_GRE)
+            tun_dip = tunnel_nh->nh_gre_tun_dip;
+        else if (tunnel_nh->nh_flags &
+            (NH_FLAG_TUNNEL_UDP_MPLS | NH_FLAG_TUNNEL_VXLAN))
+            tun_dip = tunnel_nh->nh_udp_tun_dip;
+
+        /* If source is in districution tree, it is valid */
+        if (tun_dip && fmd->fmd_outer_src_ip &&
+                    fmd->fmd_outer_src_ip == tun_dip) {
+            return NH_SOURCE_VALID;
+        }
+    }
+    return NH_SOURCE_INVALID;
+}
+
 /*
  * This function validate the source  of the tunnel incase of L2
  * multicast
@@ -476,7 +516,7 @@ nh_composite_mcast_l2(unsigned short vrf, struct vr_packet *pkt,
     unsigned short drop_reason;
     struct vr_packet *new_pkt;
     struct vr_vrf_stats *stats;
-    unsigned int tun_src, evpn_src, tor_src;
+    unsigned int tun_src, evpn_src, tor_src, fabric_src;
     unsigned short pull_len, label, pkt_vrf;
 
     stats = vr_inet_vrf_stats(vrf, pkt->vp_cpu);
@@ -493,7 +533,7 @@ nh_composite_mcast_l2(unsigned short vrf, struct vr_packet *pkt,
     /* Mark the packet as Multicast */
     pkt->vp_flags |= VP_FLAG_MULTICAST;
 
-    tun_src = evpn_src = tor_src = 0;
+    tun_src = evpn_src = tor_src = fabric_src = 0;
     if (nh->nh_validate_src) {
         if (nh->nh_validate_src(vrf, pkt, nh, fmd, &tun_src) == NH_SOURCE_INVALID) {
             drop_reason = VP_DROP_INVALID_MCAST_SOURCE;
@@ -504,6 +544,12 @@ nh_composite_mcast_l2(unsigned short vrf, struct vr_packet *pkt,
 
         if (tun_src & NH_FLAG_COMPOSITE_TOR)
             tor_src = 1;
+
+        if ((pkt->vp_if->vif_type == VIF_TYPE_PHYSICAL) &&
+            (!evpn_src && !tor_src)) {
+            fabric_src = 1;
+        }
+
     }
 
     if (tor_src) {
@@ -541,22 +587,14 @@ nh_composite_mcast_l2(unsigned short vrf, struct vr_packet *pkt,
                 break;
             }
 
-            if (pkt->vp_if->vif_type == VIF_TYPE_PHYSICAL) {
+            if (fabric_src) {
+                pull_len = VR_L2_MCAST_CTRL_DATA_LEN + VR_VXLAN_HDR_LEN;
 
-                /*
-                 * If packet is not received from TOR/MX,
-                 * pull the vxlan and control data
-                 */
-                if (!evpn_src && !tor_src) {
-                    pull_len = VR_L2_MCAST_CTRL_DATA_LEN + VR_VXLAN_HDR_LEN;
-
-                    if (!pkt_pull(new_pkt, pull_len)) {
-                        vr_pfree(new_pkt, VP_DROP_PULL);
-                        break;
-                    }
+                if (!pkt_pull(new_pkt, pull_len)) {
+                    vr_pfree(new_pkt, VP_DROP_PULL);
+                    break;
                 }
             }
-
         } else if (dir_nh->nh_flags & NH_FLAG_COMPOSITE_FABRIC) {
             if (evpn_src)
                 continue;
@@ -571,16 +609,18 @@ nh_composite_mcast_l2(unsigned short vrf, struct vr_packet *pkt,
         } else if (dir_nh->nh_flags & NH_FLAG_COMPOSITE_EVPN) {
 
             /* We replicate only if received from VM and Ovs TOR*/
-            if (!vif_is_virtual(pkt->vp_if) && !tor_src)
-                continue;
+            if (vif_is_virtual(pkt->vp_if) || tor_src) {
 
-            /* Create head space for Vxlan header */
-            clone_size = VR_L2_MCAST_PKT_HEAD_SPACE - VR_L2_MCAST_CTRL_DATA_LEN;
-            if (!(new_pkt = nh_mcast_clone(pkt, clone_size))) {
-                drop_reason = VP_DROP_MCAST_CLONE_FAIL;
-                break;
+                /* Create head space for Vxlan header */
+                clone_size = VR_L2_MCAST_PKT_HEAD_SPACE - VR_L2_MCAST_CTRL_DATA_LEN;
+                if (!(new_pkt = nh_mcast_clone(pkt, clone_size))) {
+                    drop_reason = VP_DROP_MCAST_CLONE_FAIL;
+                    break;
+                }
+                pkt_vrf = dir_nh->nh_vrf;
+            } else {
+                continue;
             }
-            pkt_vrf = dir_nh->nh_vrf;
 
         } else if (dir_nh->nh_flags & NH_FLAG_COMPOSITE_TOR) {
 
@@ -589,6 +629,16 @@ nh_composite_mcast_l2(unsigned short vrf, struct vr_packet *pkt,
             if (!(new_pkt = nh_mcast_clone(pkt, clone_size))) {
                 drop_reason = VP_DROP_MCAST_CLONE_FAIL;
                 break;
+            }
+
+            if (fabric_src) {
+
+                pull_len = VR_L2_MCAST_CTRL_DATA_LEN + VR_VXLAN_HDR_LEN;
+
+                if (!pkt_pull(new_pkt, pull_len)) {
+                    vr_pfree(new_pkt, VP_DROP_PULL);
+                    break;
+                }
             }
             pkt_vrf = dir_nh->nh_vrf;
 
@@ -642,6 +692,62 @@ nh_composite_encap(unsigned short vrf, struct vr_packet *pkt,
             drop_reason = VP_DROP_MCAST_CLONE_FAIL;
             break;
         }
+        nh_output(dir_nh->nh_dev->vif_vrf, new_pkt, dir_nh, fmd);
+    }
+
+    /* Original packet needs to be unconditionally dropped */
+drop:
+    vr_pfree(pkt, drop_reason);
+    return 0;
+}
+
+static int
+nh_composite_tor(unsigned short vrf, struct vr_packet *pkt,
+        struct vr_nexthop *nh, struct vr_forwarding_md *fmd)
+{
+    int i;
+    struct vr_vrf_stats *stats;
+    struct vr_nexthop *dir_nh;
+    unsigned short drop_reason;
+    struct vr_packet *new_pkt;
+
+    drop_reason = VP_DROP_CLONED_ORIGINAL;
+    stats = vr_inet_vrf_stats(vrf, pkt->vp_cpu);
+    if (stats)
+        stats->vrf_evpn_composites++;
+
+    if (!fmd) {
+        drop_reason = VP_DROP_NO_FMD;
+        goto drop;
+    }
+
+    for (i = 0; i < nh->nh_component_cnt; i++) {
+        dir_nh = nh->nh_component_nh[i].cnh;
+
+        /* If direct nexthop is not valid, dont process it */
+        if ((!dir_nh) || !(dir_nh->nh_flags & NH_FLAG_VALID))
+            continue;
+
+        if (dir_nh->nh_type != NH_TUNNEL)
+            continue;
+
+        /* Dont forward to same source */
+        if (fmd->fmd_outer_src_ip && fmd->fmd_outer_src_ip ==
+            dir_nh->nh_udp_tun_dip)
+            continue;
+
+        /*
+         * Enough head spaces are created in the previous nexthop
+         * handling. Just cow the packet with zero size to get different
+         * buffer space
+         */
+        new_pkt = nh_mcast_clone(pkt, 0);
+        if (!new_pkt) {
+            drop_reason = VP_DROP_MCAST_CLONE_FAIL;
+            break;
+        }
+
+        fmd->fmd_label = nh->nh_component_nh[i].cnh_label;
         nh_output(dir_nh->nh_dev->vif_vrf, new_pkt, dir_nh, fmd);
     }
 
@@ -729,7 +835,7 @@ static int
 nh_composite_fabric(unsigned short vrf, struct vr_packet *pkt,
         struct vr_nexthop *nh, struct vr_forwarding_md *fmd) 
 {
-    int i;
+    int i, fabric_src = 0;
     struct vr_vrf_stats *stats;
     struct vr_nexthop *dir_nh;
     unsigned short drop_reason;
@@ -746,6 +852,14 @@ nh_composite_fabric(unsigned short vrf, struct vr_packet *pkt,
         drop_reason = VP_DROP_NO_FMD;
         goto drop;
     }
+
+    if (!nh->nh_validate_src) {
+        drop_reason = VP_DROP_INVALID_NH;
+        goto drop;
+    }
+
+    if (nh->nh_validate_src(vrf, pkt, nh, fmd, NULL) == NH_SOURCE_VALID)
+        fabric_src = 1;
 
     /*
      * Packet can be L2 or L3 with or without control information. It is
@@ -796,7 +910,8 @@ nh_composite_fabric(unsigned short vrf, struct vr_packet *pkt,
             break;
         }
 
-        if (vif_is_virtual(new_pkt->vp_if)) {
+        /* If from VM or Tor add vxlan header */
+        if (vif_is_virtual(new_pkt->vp_if) || !fabric_src) {
             /*
              * The L2 multicast bridge entry will have VNID as label. If fmd
              * does not valid label/vnid, skip the processing
@@ -1614,12 +1729,13 @@ nh_composite_add(struct vr_nexthop *nh, vr_nexthop_req *req)
         nh->nh_validate_src = nh_composite_ecmp_validate_src;
     } else if (req->nhr_flags & NH_FLAG_COMPOSITE_FABRIC) {
         nh->nh_reach_nh = nh_composite_fabric;
+        nh->nh_validate_src = nh_composite_validate_fabric_src;
     } else if (req->nhr_flags & NH_FLAG_COMPOSITE_EVPN) {
         nh->nh_reach_nh = nh_composite_evpn;
     } else if (req->nhr_flags & NH_FLAG_COMPOSITE_ENCAP) {
         nh->nh_reach_nh = nh_composite_encap;
     } else if (req->nhr_flags & NH_FLAG_COMPOSITE_TOR) {
-        nh->nh_reach_nh = nh_composite_evpn;
+        nh->nh_reach_nh = nh_composite_tor;
     }
 
     return 0;
