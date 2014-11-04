@@ -604,6 +604,14 @@ vlan_rx(struct vr_interface *vif, struct vr_packet *pkt,
     stats->vis_ibytes += pkt_len(pkt);
     stats->vis_ipackets++;
 
+    if (vr_untag_pkt(pkt)) {
+        stats->vis_ierrors++;
+        vr_pfree(pkt, VP_DROP_PULL);
+        return 0;
+    }
+
+    vr_pset_data(pkt, pkt->vp_data);
+
     return vr_virtual_input(vif->vif_vrf, vif, pkt, VLAN_ID_INVALID);
 }
 
@@ -617,6 +625,14 @@ vlan_tx(struct vr_interface *vif, struct vr_packet *pkt)
 
     stats->vis_obytes += pkt_len(pkt);
     stats->vis_opackets++;
+
+    if (vif_is_vlan(vif) && vif->vif_ovlan_id) {
+        if (vr_tag_pkt(pkt, vif->vif_ovlan_id)) {
+            goto drop;
+        }
+        vr_pset_data(pkt, pkt->vp_data);
+    }
+
 
     pvif = vif->vif_parent;
     if (!pvif)
@@ -768,6 +784,9 @@ eth_rx(struct vr_interface *vif, struct vr_packet *pkt,
     if (vif_mode_xconnect(vif))
         pkt->vp_flags |= VP_FLAG_TO_ME;
 
+    if (vif->vif_flags & VIF_FLAG_NATIVE_VLAN_TAG)
+        vlan_id = 0;
+
     if (vlan_id != VLAN_ID_INVALID && vlan_id < VLAN_ID_MAX) {
         if (vif->vif_btable) {
             sub_vif = vif_bridge_get_sub_interface(vif->vif_btable, vlan_id,
@@ -776,6 +795,7 @@ eth_rx(struct vr_interface *vif, struct vr_packet *pkt,
             if (vif->vif_sub_interfaces)
                 sub_vif = vif->vif_sub_interfaces[vlan_id];
         }
+
         if (sub_vif)
             return sub_vif->vif_rx(sub_vif, pkt, VLAN_ID_INVALID);
     }

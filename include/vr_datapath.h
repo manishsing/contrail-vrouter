@@ -38,5 +38,7 @@ int vr_trap_l2_well_known_packets(unsigned short , struct vr_packet *,
 int vr_tor_input(unsigned short , struct vr_packet *, 
                  struct vr_forwarding_md *);
 
+int vr_untag_pkt(struct vr_packet *);
+int vr_tag_pkt(struct vr_packet *, unsigned short );
 
 #endif //__VR_DATAPATH_H__

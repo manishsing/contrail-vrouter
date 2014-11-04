@@ -44,6 +44,7 @@ static int resp_code;
 static vr_route_req rt_req;
 static uint8_t rt_prefix[16], rt_src[16], rt_marker[16];
 static bool cmd_proxy_set = false;
+static bool cmd_trap_set = false;
 
 static int cmd_set, dump_set;
 static int family_set, help_set;
@@ -135,6 +136,8 @@ vr_route_req_process(void *s_req)
                 strcat(flags, "L");
             if (rt->rtr_label_flags & VR_RT_HOSTED_FLAG)
                 strcat(flags, "H");
+            if (rt->rtr_label_flags & VR_RT_ARP_TRAP_FLAG)
+                strcat(flags, "T");
 
             printf("%5s", flags);
 
@@ -246,6 +249,9 @@ vr_build_route_request(unsigned int op, int family, int8_t *prefix,
 
         if (cmd_proxy_set)
             rt_req.rtr_label_flags |= VR_RT_HOSTED_FLAG;
+
+        if (cmd_trap_set)
+            rt_req.rtr_label_flags |= VR_RT_ARP_TRAP_FLAG;
 
         if ((family == AF_INET) ||
             (family == AF_INET6)) {
@@ -385,6 +391,7 @@ usage_internal()
            "       t <label/vnid>\n"
            "       f <family 0 - AF_INET 1 - AF_BRIDGE 2 - AF_INET6 >\n"
            "       e <mac address in : format>\n"
+           "       T <trap ARP requests to Agent for this route>\n"
            "       r <replacement route preifx length for delete>\n"
            "       v <vrfid>\n");
 
@@ -524,7 +531,7 @@ int main(int argc, char *argv[])
     cmd_label = -1;
     cmd_family_id = AF_INET;
 
-    while ((opt = getopt_long(argc, argv, "cdbmPn:p:l:v:t:s:e:f:r:",
+    while ((opt = getopt_long(argc, argv, "TcdbmPn:p:l:v:t:s:e:f:r:",
                     long_options, &option_index)) >= 0) { 
             switch (opt) {
             case 'c':
@@ -606,6 +613,10 @@ int main(int argc, char *argv[])
 
             case 'P':
                 cmd_proxy_set = true;
+                break;
+
+            case 'T':
+                cmd_trap_set = true;
                 break;
 
             case 0:
