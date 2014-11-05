@@ -512,8 +512,9 @@ vhost_tx(struct vr_interface *vif, struct vr_packet *pkt)
     struct vr_interface_stats *stats = vif_get_stats(vif, pkt->vp_cpu);
     unsigned short eth_proto, pull_len = 0;
     unsigned char *new_eth, *eth;
+    struct vr_eth *eth_hdr;
     struct vr_vlan_hdr *vlan;
-
+    struct vr_interface *in_vif;
 
     stats->vis_obytes += pkt_len(pkt);
     stats->vis_opackets++;
@@ -521,25 +522,36 @@ vhost_tx(struct vr_interface *vif, struct vr_packet *pkt)
     if (vif->vif_type == VIF_TYPE_XEN_LL_HOST)
         memcpy(pkt_data(pkt), vif->vif_mac, sizeof(vif->vif_mac));
     else if (vif->vif_type == VIF_TYPE_HOST) {
-
-        /* Untag any tagged packets */
-        eth = pkt_data(pkt);
-        eth_proto = ntohs(*(unsigned short *)(eth + VR_ETHER_PROTO_OFF));
-        while (eth_proto == VR_ETH_PROTO_VLAN) {
-            vlan = (struct vr_vlan_hdr *)(pkt_data(pkt) + pull_len +
-                                              VR_ETHER_HLEN);
-            eth_proto = ntohs(vlan->vlan_proto);
-            pull_len += sizeof(*vlan);
-        }
-
-        /* If there are any vlan tags */
-        if (pull_len) {
-            new_eth = pkt_pull(pkt, pull_len);
-            if (!new_eth) {
-                vr_pfree(pkt, VP_DROP_PULL);
-                return 0;
+        in_vif = pkt->vp_if;
+        if (!hif_ops->hif_get_encap ||
+                (hif_ops->hif_get_encap(in_vif) == VIF_ENCAP_TYPE_ETHER)) {
+            /* Untag any tagged packets */
+            eth = pkt_data(pkt);
+            eth_proto = ntohs(*(unsigned short *)(eth + VR_ETHER_PROTO_OFF));
+            while (eth_proto == VR_ETH_PROTO_VLAN) {
+                vlan = (struct vr_vlan_hdr *)(pkt_data(pkt) + pull_len +
+                        VR_ETHER_HLEN);
+                eth_proto = ntohs(vlan->vlan_proto);
+                pull_len += sizeof(*vlan);
             }
-            memmove(new_eth, eth, (2 * VR_ETHER_ALEN));
+
+            /* If there are any vlan tags */
+            if (pull_len) {
+                new_eth = pkt_pull(pkt, pull_len);
+                if (!new_eth) {
+                    vr_pfree(pkt, VP_DROP_PULL);
+                    return 0;
+                }
+                memmove(new_eth, eth, (2 * VR_ETHER_ALEN));
+            }
+        } else {
+            eth_hdr = (struct vr_eth *)pkt_push(pkt, VR_ETHER_HLEN);
+            memcpy(eth_hdr->eth_dmac, vif->vif_mac, VR_ETHER_ALEN);
+            memcpy(eth_hdr->eth_smac, vif->vif_mac, VR_ETHER_ALEN);
+            if (pkt->vp_type == VP_TYPE_IP6)
+                eth_hdr->eth_proto = htons(VR_ETH_PROTO_IP6);
+            else
+                eth_hdr->eth_proto = htons(VR_ETH_PROTO_IP);
         }
     }
 

@@ -1150,6 +1150,13 @@ linux_rx_handler(struct sk_buff **pskb)
             vlan_id = skb->vlan_tci & 0xFFF;
             skb->vlan_tci = 0;
         }
+    } else {
+        if (skb_headroom(skb) < ETH_HLEN) {
+            ret = pskb_expand_head(skb, ETH_HLEN - skb_headroom(skb) +
+                    ETH_HLEN + sizeof(struct agent_hdr), 0, GFP_ATOMIC);
+            if (ret)
+                goto error;
+        }
     }
 
     ret = linux_pull_outer_headers(skb);
@@ -1577,12 +1584,10 @@ linux_if_get_encap(struct vr_interface *vif)
 {
     struct net_device *dev = (struct net_device *)vif->vif_os;
 
-    if (dev) {
-        if (dev->type == ARPHRD_ETHER)
-            return VIF_ENCAP_TYPE_ETHER;
-    }
+    if (dev && (dev->type != ARPHRD_ETHER))
+        return VIF_ENCAP_TYPE_L3;
 
-    return VIF_ENCAP_TYPE_L3;
+    return VIF_ENCAP_TYPE_ETHER;
 }
 
 /*
