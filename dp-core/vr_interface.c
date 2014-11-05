@@ -86,6 +86,9 @@ vif_cmn_rewrite(struct vr_interface *vif, struct vr_packet *pkt,
 {
     unsigned char *head;
 
+    if (!len)
+        return pkt_data(pkt);
+
     if (pkt_head_space(pkt) < len) {
         pkt = vr_pexpand_head(pkt, len - pkt_head_space(pkt));
         if (!pkt)
@@ -761,6 +764,47 @@ vm_rx(struct vr_interface *vif, struct vr_packet *pkt,
     return vr_virtual_input(vif->vif_vrf, vif, pkt, vlan_id);
 }
 
+static int
+tun_rx(struct vr_interface *vif, struct vr_packet *pkt,
+        unsigned short vlan_id)
+{
+    unsigned char first_b;
+    struct vr_forwarding_md fmd;
+    struct vr_interface_stats *stats = vif_get_stats(vif, pkt->vp_cpu);
+
+    stats->vis_ibytes += pkt_len(pkt);
+    stats->vis_ipackets++;
+
+    if (vif_mode_xconnect(vif))
+        pkt->vp_flags |= VP_FLAG_TO_ME;
+
+    first_b = *pkt_data(pkt);
+    first_b &= 0xf0;
+
+    switch (first_b) {
+    case 0x40:
+        pkt->vp_type = VP_TYPE_IP;
+        break;
+
+    case 0x60:
+        pkt->vp_type = VP_TYPE_IP6;
+        break;
+
+    default:
+        vr_pfree(pkt, VP_DROP_INVALID_PACKET);
+        return 0;
+    }
+
+    pkt_set_network_header(pkt, pkt->vp_data);
+
+    vr_init_forwarding_md(&fmd);
+    fmd.fmd_vlan = vlan_id;
+
+    vr_l3_input(vif->vif_vrf, pkt, &fmd);
+
+    return 0;
+}
+
 
 static int
 eth_rx(struct vr_interface *vif, struct vr_packet *pkt,
@@ -940,6 +984,11 @@ eth_drv_add(struct vr_interface *vif,
     ret = hif_ops->hif_add(vif);
     if (ret)
         goto exit_add;
+
+    if ((vif->vif_type == VIF_TYPE_PHYSICAL) &&
+            (hif_ops->hif_get_encap(vif) == VIF_ENCAP_TYPE_L3)) {
+            vif->vif_rx = tun_rx;
+    }
 
     /*
      * as soon as we add the tap, packets will start traversing vrouter.

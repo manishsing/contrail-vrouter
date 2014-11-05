@@ -1844,7 +1844,8 @@ nh_encap_add(struct vr_nexthop *nh, vr_nexthop_req *req)
         nh->nh_dev = vif;
         nh->nh_encap_family = req->nhr_encap_family;
         nh->nh_encap_len = req->nhr_encap_size;
-        memcpy(nh->nh_data, req->nhr_encap, nh->nh_encap_len);
+        if (nh->nh_encap_len && nh->nh_data)
+            memcpy(nh->nh_data, req->nhr_encap, nh->nh_encap_len);
 
         nh->nh_reach_nh = nh_encap_l3_unicast;
         nh->nh_validate_src = nh_encap_l3_validate_src;
@@ -1892,12 +1893,9 @@ vr_nexthop_size(vr_nexthop_req *req)
 {
     unsigned int size = sizeof(struct vr_nexthop);
 
-    if ((((req->nhr_type == NH_ENCAP) && (!(req->nhr_flags &
-               NH_FLAG_ENCAP_L2))) || (req->nhr_type == NH_TUNNEL))) {
-        if (!req->nhr_encap_size || req->nhr_encap == NULL) 
-            return -EINVAL;
-        size += req->nhr_encap_size;
-    }
+    if ((req->nhr_type == NH_ENCAP) || (req->nhr_type == NH_TUNNEL))
+        if (req->nhr_encap)
+            size += req->nhr_encap_size;
 
     return size;
 }
