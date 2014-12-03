@@ -106,8 +106,10 @@ vr_skb_set_rxhash(struct sk_buff *skb, __u32 val)
            (RHEL_MAJOR == 6) && (RHEL_MINOR == 4)
     skb->rxhash = val;
 #endif
-#else
+#elif (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
     skb->rxhash = val;
+#else
+    skb->hash = val;
 #endif
 }
 
@@ -125,8 +127,10 @@ vr_skb_get_rxhash(struct sk_buff *skb)
 #else
     return 0;
 #endif
-#else
+#elif (LINUX_VERSION_CODE < KERNEL_VERSION(3,15,0))
     return skb->rxhash;
+#else
+    return skb->hash;
 #endif
 }
 
@@ -330,7 +334,7 @@ linux_xmit_segment(struct vr_interface *vif, struct sk_buff *seg,
         unsigned short type)
 {
     int err = -ENOMEM;
-    struct vr_ip *iph;
+    struct vr_ip *iph, *i_iph = NULL;
     unsigned short iphlen;
     unsigned short ethlen;
     struct udphdr *udph;
@@ -361,7 +365,20 @@ linux_xmit_segment(struct vr_interface *vif, struct sk_buff *seg,
     }
     iph = (struct vr_ip *)(seg->data + ethlen);
     iph->ip_len = htons(seg->len - ethlen);
-    iph->ip_id = htons(vr_generate_unique_ip_id());
+
+    if (type == VP_TYPE_IPOIP)
+        i_iph = (struct vr_ip *)skb_network_header(seg);
+
+    /*
+     * it is important that we copy the inner network header's
+     * ip id to outer. For now, agent diagnostics (traceroute)
+     * depends on this behavior.
+     */
+    if (i_iph)
+        iph->ip_id = i_iph->ip_id;
+    else
+        iph->ip_id = htons(vr_generate_unique_ip_id());
+
     iph->ip_csum = 0;
     iph->ip_csum = ip_fast_csum(iph, iph->ip_hl);
 
@@ -953,6 +970,7 @@ linux_get_packet(struct sk_buff *skb, struct vr_interface *vif)
     if (skb->ip_summed == CHECKSUM_PARTIAL)
         pkt->vp_flags |= VP_FLAG_CSUM_PARTIAL;
 
+    pkt->vp_ttl = 64;
     pkt->vp_type = VP_TYPE_NULL;
 
     return pkt;
@@ -993,12 +1011,28 @@ linux_ip_proto_pull(struct iphdr *iph)
     return false;
 }
 
+static bool
+linux_ipv6_proto_pull(struct ipv6hdr *ip6h)
+{
+    __u8 proto = ip6h->nexthdr;
+
+    if ((proto == VR_IP_PROTO_TCP) ||
+            (proto == VR_IP_PROTO_UDP) ||
+            (proto == VR_IP_PROTO_ICMP6)) {
+        return true;
+    }
+
+    return false;
+}
+
 static int
 linux_pull_outer_headers(struct sk_buff *skb)
 {
     struct vlan_hdr *vhdr;
-    uint16_t proto, offset;
+    uint16_t proto, offset, ip_proto = 0;
     struct iphdr *iph = NULL;
+    struct ipv6hdr *ip6h = NULL;
+    struct vr_icmp *icmph;
 
     offset = skb->mac_len;
     proto = skb->protocol;
@@ -1023,14 +1057,29 @@ linux_pull_outer_headers(struct sk_buff *skb)
         if (!pskb_may_pull(skb, offset))
             goto pull_fail;
         iph = ip_hdr(skb);
+        if (linux_ip_proto_pull(iph) &&
+            vr_ip_transport_header_valid((struct vr_ip *)iph)) {
+            ip_proto = iph->protocol;
+        }
+    } else if (proto == htons(ETH_P_IPV6)) {
+        skb_set_network_header(skb, offset);
+
+        offset += sizeof(struct ipv6hdr);
+        if (!pskb_may_pull(skb, offset))
+            goto pull_fail;
+
+        ip6h = ipv6_hdr(skb);
+
+        if (linux_ipv6_proto_pull(ip6h)) {
+            ip_proto = ip6h->nexthdr;
+        }
     } else if (proto == htons(ETH_P_ARP)) {
         offset += sizeof(struct vr_arp);
         if (!pskb_may_pull(skb, offset))
             goto pull_fail;
     }
 
-    if (iph && linux_ip_proto_pull(iph) &&
-            vr_ip_transport_header_valid((struct vr_ip *)iph)) {
+    if (iph || ip6h) {
         /*
          * this covers both regular port number offsets that come in
          * the first 4 bytes and the icmp header
@@ -1040,8 +1089,12 @@ linux_pull_outer_headers(struct sk_buff *skb)
             goto pull_fail;
 
 
-        iph = ip_hdr(skb);
-        if (iph->protocol == VR_IP_PROTO_ICMP) {
+        if (iph)
+            iph = ip_hdr(skb);
+        else
+            ip6h = ipv6_hdr(skb);
+
+        if (ip_proto == VR_IP_PROTO_ICMP) {
             if (vr_icmp_error((struct vr_icmp *)((unsigned char *)iph +
                             (iph->ihl * 4)))) {
                 iph = (struct iphdr *)(skb->data + offset);
@@ -1058,9 +1111,17 @@ linux_pull_outer_headers(struct sk_buff *skb)
                         goto pull_fail;
                 }
             }
+        } else if (ip_proto == VR_IP_PROTO_ICMP6) {
+            icmph = (struct vr_icmp*) ((char *)ip6h + sizeof(struct ipv6hdr));
+            if (icmph->icmp_type == VR_ICMP6_TYPE_NEIGH_SOL) {
+                /* ICMP options size for neighbor solicit is 24 bytes */
+                offset += 24;
+
+                if (!pskb_may_pull(skb, offset))
+                    goto pull_fail;
+            }
         }
     }
-
 
     return 0;
 
@@ -1319,6 +1380,7 @@ vr_interface_common_hook(struct sk_buff *skb)
     if (skb->dev == NULL) {
         goto error;
     }
+    dev = skb->dev;
 
     if (vr_get_vif_ptr(skb->dev) == (&vr_reset_interface)) {
         vdev = vhost_get_vhost_for_phys(skb->dev);
@@ -1352,6 +1414,9 @@ vr_interface_common_hook(struct sk_buff *skb)
         vif = vr_get_vif_ptr(skb->dev);
     }
 
+    if (!vif)
+        goto error;
+
 #if 0
     if(vrouter_dbg) {
         __skb_dump_info("vr_intf_br_hk:", skb, vif);
@@ -1375,16 +1440,25 @@ vr_interface_common_hook(struct sk_buff *skb)
     }
 #endif
 
-    ret = linux_pull_outer_headers(skb);
-    if (ret < 0)
-        goto error;
-
     if (skb->protocol == htons(ETH_P_8021Q)) {
         vhdr = (struct vlan_hdr *)skb->data;
         vlan_id = ntohs(vhdr->h_vlan_TCI) & VLAN_VID_MASK;
     }
 
-    skb_push(skb, ETH_HLEN);
+    if (dev->type == ARPHRD_ETHER) {
+        skb_push(skb, skb->mac_len);
+    } else {
+        if (skb_headroom(skb) < ETH_HLEN) {
+            ret = pskb_expand_head(skb, ETH_HLEN - skb_headroom(skb) +
+                    ETH_HLEN + sizeof(struct agent_hdr), 0, GFP_ATOMIC);
+            if (ret)
+                goto error;
+        }
+    }
+
+    ret = linux_pull_outer_headers(skb);
+    if (ret < 0)
+        goto error;
 
     pkt = linux_get_packet(skb, vif);
     if (!pkt)

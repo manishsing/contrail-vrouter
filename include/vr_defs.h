@@ -31,8 +31,16 @@
 #define AGENT_TRAP_ECMP_RESOLVE     9
 #define AGENT_TRAP_SOURCE_MISMATCH  10
 #define AGENT_TRAP_HANDLE_DF        11
-#define AGENT_TRAP_TOR_CONTROL_PKT  12
-#define MAX_AGENT_HDR_COMMANDS      13
+#define AGENT_TRAP_ZERO_TTL         12
+#define AGENT_TRAP_ICMP_ERROR       13
+#define AGENT_TRAP_TOR_CONTROL_PKT  14
+#define MAX_AGENT_HDR_COMMANDS      15
+
+enum rt_type{
+    RT_UCAST = 0,
+    RT_MCAST,
+    RT_MAX,
+};
 
 #define VR_RT_LABEL_VALID_FLAG      0x1
 #define VR_RT_HOSTED_FLAG           0x2
@@ -46,6 +54,10 @@ struct agent_hdr {
     unsigned int hdr_cmd_param_1;
 } __attribute__((packed));
     
+#define CMD_PARAM_PACKET_CTRL       0x1
+#define CMD_PARAM_1_DIAG            0x1
+#define MAX_CMD_PARAMS                3
+
 struct vr_list_node {
         struct vr_list_node *node_n;
 };
