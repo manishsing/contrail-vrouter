@@ -211,8 +211,8 @@ nh_push_mpls_header(struct vr_packet *pkt, unsigned int label)
  */
 static bool
 nh_udp_tunnel_helper(struct vr_packet *pkt, unsigned short sport,
-                     unsigned short dport, unsigned int sip, 
-                     unsigned int dip) 
+                     unsigned short dport, unsigned int sip,
+                     unsigned int dip)
 {
     struct vr_ip *ip;
     struct vr_udp *udp;
