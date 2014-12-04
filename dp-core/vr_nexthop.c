@@ -1475,11 +1475,13 @@ nh_encap_l3_unicast(unsigned short vrf, struct vr_packet *pkt,
     stats = vr_inet_vrf_stats(vrf, pkt->vp_cpu);
 
     vif = nh->nh_dev;
-    ip = (struct vr_ip *)pkt_network_header(pkt);
-    if (vr_ip_is_ip6(ip)) {
-        pkt->vp_type = VP_TYPE_IP6;
-    } else {
-        pkt->vp_type = VP_TYPE_IP;
+    if (vr_pkt_is_ip(pkt)) {
+        ip = (struct vr_ip *)pkt_network_header(pkt);
+        if (vr_ip_is_ip6(ip)) {
+            pkt->vp_type = VP_TYPE_IP6;
+        } else {
+            pkt->vp_type = VP_TYPE_IP;
+        }
     }
 
     if (vr_pkt_is_diag(pkt)) {
@@ -1530,7 +1532,9 @@ nh_encap_l3_unicast(unsigned short vrf, struct vr_packet *pkt,
         if (nh->nh_encap_len) {
             proto_p = (unsigned short *)(pkt_data(pkt) +
                     nh->nh_encap_len - 2);
-            if (pkt->vp_type == VP_TYPE_IP6)
+            if (pkt->vp_type == VP_TYPE_ARP)
+                *proto_p = htons(VR_ETH_PROTO_ARP);
+            else if (pkt->vp_type == VP_TYPE_IP6)
                 *proto_p = htons(VR_ETH_PROTO_IP6);
             else
                 *proto_p = htons(VR_ETH_PROTO_IP);
