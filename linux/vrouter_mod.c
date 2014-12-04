@@ -1126,7 +1126,7 @@ lh_pull_inner_headers_fast_udp(struct vr_packet *pkt, int
         }
 
         if (ntohs(eth_proto) == VR_ETH_PROTO_ARP) {
-            pull_len += sizeof(struct arphdr);
+            pull_len += sizeof(struct vr_arp);
             if (frag_size < pull_len)
                 goto slow_path;
         }
@@ -1534,7 +1534,7 @@ lh_pull_inner_headers_fast_gre(struct vr_packet *pkt, int
         }
 
         if (ntohs(eth_proto) == VR_ETH_PROTO_ARP) {
-            pull_len += sizeof(struct arphdr);
+            pull_len += sizeof(struct vr_arp);
             if (frag_size < pull_len)
                 goto slow_path;
         }
@@ -1937,7 +1937,7 @@ lh_pull_inner_headers(struct vr_packet *pkt,
         }
 
         if (ntohs(eth_proto) == VR_ETH_PROTO_ARP) {
-            pull_len += sizeof(struct arphdr);
+            pull_len += sizeof(struct vr_arp);
             if (!pskb_may_pull(skb, pull_len))
                 goto error;
         }

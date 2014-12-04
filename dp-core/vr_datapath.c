@@ -344,7 +344,6 @@ vr_arp_input(unsigned short vrf, struct vr_packet *pkt,
     memcpy(&sarp, pkt_data(pkt), sizeof(struct vr_arp));
     switch (ntohs(sarp.arp_op)) {
     case VR_ARP_OP_REQUEST:
-        if (tor_src)
         return vr_handle_arp_request(vrf, &sarp, pkt, fmd, tor_src);
         break;
 
