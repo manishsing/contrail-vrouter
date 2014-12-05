@@ -502,14 +502,21 @@ vr_tor_input(unsigned short vrf, struct vr_packet *pkt,
     struct vr_arp *arp;
     struct vr_interface *vif = pkt->vp_if;
     struct vr_nexthop *nh;
-    unsigned int rt_prefix;
+    unsigned int rt_prefix, pull_len;
     struct vr_eth *eth;
 
+
     if (pkt->vp_type == VP_TYPE_IP) {
+        pull_len = pkt_get_network_header_off(pkt) - pkt_head_space(pkt);
+        if (pkt_pull(pkt, pull_len) < 0) {
+            vr_pfree(pkt, VP_DROP_PULL);
+            return 1;
+        }
         if (vr_l3_well_known_packet(vrf, pkt)) {
             vr_trap(pkt, vrf,  AGENT_TRAP_L3_PROTOCOLS, NULL);
             return 1;
         }
+        pkt_push(pkt, pull_len);
     } else if (pkt->vp_type == VP_TYPE_ARP) {
         arp = (struct vr_arp *)pkt_network_header(pkt);
 
