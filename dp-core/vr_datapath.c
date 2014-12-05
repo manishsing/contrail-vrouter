@@ -8,7 +8,6 @@
 #include <vr_datapath.h>
 #include <vr_packet.h>
 #include <vr_mirror.h>
-#include <vr_bridge.h>
 
 extern unsigned int vr_inet_route_flags(unsigned int, unsigned int);
 
@@ -31,9 +30,8 @@ vr_v6_prefix_is_ll(uint8_t prefix[])
 
 
 static int
-vr_arp_request_treatment(unsigned short vrf, struct vr_interface *vif,
-                         struct vr_arp *arp, struct vr_nexthop **ret_nh,
-                         bool tor_src)
+vr_arp_request_treatment(struct vr_interface *vif, struct vr_arp *arp,
+                                                   struct vr_nexthop **ret_nh)
 {
     struct vr_route_req rt;
     struct vr_nexthop *nh;
@@ -82,13 +80,10 @@ vr_arp_request_treatment(unsigned short vrf, struct vr_interface *vif,
     }
 
     if (vr_grat_arp(arp) && (vif->vif_type == VIF_TYPE_PHYSICAL)) {
-        if (tor_src)
-            return PKT_ARP_DONT_PROCESS;
-
         return PKT_ARP_TRAP_XCONNECT;
     }
 
-    rt.rtr_req.rtr_vrf_id = vrf;
+    rt.rtr_req.rtr_vrf_id = vif->vif_vrf;
     rt.rtr_req.rtr_prefix = (uint8_t*)&rt_prefix;
     *(uint32_t*)rt.rtr_req.rtr_prefix = (arp->arp_dpa);
     rt.rtr_req.rtr_prefix_size = 4;
@@ -97,7 +92,7 @@ vr_arp_request_treatment(unsigned short vrf, struct vr_interface *vif,
     rt.rtr_req.rtr_label_flags = 0;
     rt.rtr_req.rtr_marker_size = 0;
 
-    nh = vr_inet_route_lookup(vrf, &rt, NULL);
+    nh = vr_inet_route_lookup(vif->vif_vrf, &rt, NULL);
 
     if (vr_grat_arp(arp) && vif_is_virtual(vif)) {
         if (rt.rtr_req.rtr_label_flags & VR_RT_ARP_TRAP_FLAG) {
@@ -106,18 +101,11 @@ vr_arp_request_treatment(unsigned short vrf, struct vr_interface *vif,
         return PKT_ARP_DROP;
     }
 
-    if (!nh || nh->nh_type == NH_DISCARD) {
-        if (tor_src)
-            return PKT_ARP_DONT_PROCESS;
-
+    if (!nh || nh->nh_type == NH_DISCARD)
         return PKT_ARP_DROP;
-    }
 
     if (rt.rtr_req.rtr_label_flags & VR_RT_HOSTED_FLAG)
         return PKT_ARP_PROXY;
-
-    if (tor_src)
-        return PKT_ARP_DONT_PROCESS;
 
     /*
      * If an L3VPN route is learnt, we need to proxy
@@ -144,88 +132,58 @@ vr_arp_request_treatment(unsigned short vrf, struct vr_interface *vif,
 
 static int
 vr_handle_arp_request(unsigned short vrf, struct vr_arp *sarp,
-                      struct vr_packet *pkt,
-                      struct vr_forwarding_md *fmd, bool tor_src)
+                      struct vr_packet *pkt, struct vr_forwarding_md *fmd)
 {
     struct vr_packet *cloned_pkt;
     struct vr_interface *vif = pkt->vp_if;
+    unsigned short proto = htons(VR_ETH_PROTO_ARP);
+    struct vr_eth *eth;
+    unsigned short *eth_proto;
+    unsigned short pull_tail_len = VR_ETHER_HLEN;
     struct vr_arp *arp;
-    unsigned short proto, pull_tail_len, *eth_proto;
     unsigned int dpa;
     int arp_result;
     struct vr_nexthop *nh;
-    struct vr_route_req rt;
-    uint32_t rt_prefix;
-    struct vr_eth *eth;
 
-    arp_result = vr_arp_request_treatment(vrf, vif, sarp, &nh, tor_src);
+    arp_result = vr_arp_request_treatment(vif, sarp, &nh);
 
     switch (arp_result) {
-
     case PKT_ARP_PROXY:
 
-        memset(&rt, 0, sizeof(rt));
         pkt_reset(pkt);
 
-        if (tor_src) {
-            rt.rtr_req.rtr_mac_size = VR_ETHER_ALEN;
-            rt.rtr_req.rtr_mac =(int8_t *) sarp->arp_sha;
-            rt.rtr_req.rtr_vrf_id = vrf;
-            nh = vr_bridge_lookup(vrf, &rt, pkt);
-            if (!nh || nh->nh_type == NH_DISCARD) {
-                vr_pfree(pkt, VP_DROP_INVALID_NH);
-                return 1;
+        eth = (struct vr_eth *)pkt_data(pkt);
+        memcpy(eth->eth_dmac, sarp->arp_sha, VR_ETHER_ALEN);
+        memcpy(eth->eth_smac, vif->vif_mac, VR_ETHER_ALEN);
+        eth_proto = &eth->eth_proto;
+        if (vif_is_vlan(vif)) {
+            if (vif->vif_ovlan_id) {
+                *eth_proto = htons(VR_ETH_PROTO_VLAN);
+                eth_proto++;
+                *eth_proto = htons(vif->vif_ovlan_id);
+                eth_proto++;
+                pull_tail_len += sizeof(struct vr_vlan_hdr);
             }
-
-            pull_tail_len = VR_ETHER_HLEN;
-            proto = htons(VR_ETH_PROTO_ARP);
-
-            eth = (struct vr_eth *)pkt_data(pkt);
-            memcpy(eth->eth_dmac, sarp->arp_sha, VR_ETHER_ALEN);
-            memcpy(eth->eth_smac, vif->vif_mac, VR_ETHER_ALEN);
-            eth_proto = &eth->eth_proto;
-
-            if (vif_is_vlan(vif)) {
-                if (vif->vif_ovlan_id) {
-                    *eth_proto = htons(VR_ETH_PROTO_VLAN);
-                    eth_proto++;
-                    *eth_proto = htons(vif->vif_ovlan_id);
-                    eth_proto++;
-                    pull_tail_len += sizeof(struct vr_vlan_hdr);
-                }
-            }
-            memcpy(eth_proto, &proto, sizeof(proto));
-            arp = (struct vr_arp *)pkt_pull_tail(pkt, pull_tail_len);
-        } else {
-            rt.rtr_req.rtr_vrf_id = vrf;
-            rt.rtr_req.rtr_prefix = (uint8_t*)&rt_prefix;
-            *(uint32_t*)rt.rtr_req.rtr_prefix = (sarp->arp_spa);
-            rt.rtr_req.rtr_prefix_size = 4;
-            rt.rtr_req.rtr_prefix_len = 32;
-            nh = vr_inet_route_lookup(vrf, &rt, NULL);
-            if (!nh || nh->nh_type == NH_DISCARD) {
-                vr_pfree(pkt, VP_DROP_INVALID_NH);
-                return 1;
-            }
-            arp = (struct vr_arp *)pkt_data(pkt);
         }
+        memcpy(eth_proto, &proto, sizeof(proto));
+
+        arp = (struct vr_arp *)pkt_pull_tail(pkt, pull_tail_len);
 
         sarp->arp_op = htons(VR_ARP_OP_REPLY);
-        memcpy(sarp->arp_dha, sarp->arp_sha, VR_ETHER_ALEN);
         memcpy(sarp->arp_sha, vif->vif_mac, VR_ETHER_ALEN);
+        memcpy(sarp->arp_dha, eth->eth_dmac, VR_ETHER_ALEN);
         dpa = sarp->arp_dpa;
         memcpy(&sarp->arp_dpa, &sarp->arp_spa, sizeof(sarp->arp_dpa));
         memcpy(&sarp->arp_spa, &dpa, sizeof(sarp->arp_spa));
 
         memcpy(arp, sarp, sizeof(*sarp));
         pkt_pull_tail(pkt, sizeof(*arp));
-        nh_output(vrf, pkt, nh, fmd);
-        break;
 
+        vif->vif_tx(vif, pkt);
+        break;
     case PKT_ARP_XCONNECT:
         vif_xconnect(vif, pkt);
         break;
-
     case PKT_ARP_TRAP_XCONNECT:
         cloned_pkt = vr_pclone(pkt);
         if (cloned_pkt) {
@@ -234,16 +192,10 @@ vr_handle_arp_request(unsigned short vrf, struct vr_arp *sarp,
         }
         vr_trap(pkt, vrf, AGENT_TRAP_ARP, NULL);
         break;
-
     case PKT_ARP_TRAP:
         vr_preset(pkt);
         vr_trap(pkt, vrf, AGENT_TRAP_ARP, NULL);
         break;
-
-    case PKT_ARP_DONT_PROCESS:
-        return 0;
-        break;
-
     case PKT_ARP_FLOOD:
         if (nh) {
             vr_preset(pkt);
@@ -256,7 +208,7 @@ vr_handle_arp_request(unsigned short vrf, struct vr_arp *sarp,
         vr_pfree(pkt, VP_DROP_ARP_NOT_ME);
     }
 
-    return 1;
+    return 0;
 }
 
 /*
@@ -338,19 +290,17 @@ vr_pkt_type(struct vr_packet *pkt, unsigned short offset)
 
 int
 vr_arp_input(unsigned short vrf, struct vr_packet *pkt,
-             struct vr_forwarding_md *fmd, bool tor_src)
+                            struct vr_forwarding_md *fmd)
 {
     struct vr_arp sarp;
 
     memcpy(&sarp, pkt_data(pkt), sizeof(struct vr_arp));
     switch (ntohs(sarp.arp_op)) {
     case VR_ARP_OP_REQUEST:
-        return vr_handle_arp_request(vrf, &sarp, pkt, fmd, tor_src);
+        vr_handle_arp_request(vrf, &sarp, pkt, fmd);
         break;
 
     case VR_ARP_OP_REPLY:
-        if (tor_src)
-            return 0;
         vr_handle_arp_reply(vrf, &sarp, pkt, fmd);
         break;
 
@@ -497,7 +447,7 @@ vr_l3_input(unsigned short vrf, struct vr_packet *pkt,
          vr_flow_inet6_input(vif->vif_router, vrf, pkt, VR_ETH_PROTO_IP6, fmd);
          return 1;
     } else if (pkt->vp_type == VP_TYPE_ARP) {
-        return vr_arp_input(vrf, pkt, fmd, false);
+        return vr_arp_input(vrf, pkt, fmd);
     }
     return 0;
 }
@@ -548,28 +498,51 @@ int
 vr_tor_input(unsigned short vrf, struct vr_packet *pkt,
         struct vr_forwarding_md *fmd)
 {
-    unsigned short pull_len, handled;
+    struct vr_route_req rt;
+    struct vr_arp *arp;
+    struct vr_interface *vif = pkt->vp_if;
+    struct vr_nexthop *nh;
+    unsigned int rt_prefix;
+    struct vr_eth *eth;
 
     if (pkt->vp_type == VP_TYPE_IP) {
-        pull_len = pkt_get_network_header_off(pkt) - pkt_head_space(pkt);
-        if (!pkt_pull(pkt, pull_len)) {
-            vr_pfree(pkt, VP_DROP_INVALID_PACKET);
-            return 1;
-        }
         if (vr_l3_well_known_packet(vrf, pkt)) {
             vr_trap(pkt, vrf,  AGENT_TRAP_L3_PROTOCOLS, NULL);
             return 1;
         }
-        pkt_push(pkt, pull_len);
     } else if (pkt->vp_type == VP_TYPE_ARP) {
-        pull_len = pkt_get_network_header_off(pkt) - pkt_head_space(pkt);
-        pkt_pull(pkt, pull_len);
-        handled = vr_arp_input(vrf, pkt, fmd, true);
-        if (!handled) {
-            pkt_push(pkt, pull_len);
+        arp = (struct vr_arp *)pkt_network_header(pkt);
+
+        /* Dnot handle ARP reply */
+        if (arp->arp_op == VR_ARP_OP_REPLY) {
             goto unhandled;
         }
-        return 1;
+
+        rt.rtr_req.rtr_vrf_id = vrf;
+        rt.rtr_req.rtr_prefix = (uint8_t *)&rt_prefix;
+        *(uint32_t*)rt.rtr_req.rtr_prefix = arp->arp_dpa;
+        rt.rtr_req.rtr_prefix_size = 4;
+        rt.rtr_req.rtr_prefix_len = 32;
+        rt.rtr_req.rtr_nh_id = 0;
+        rt.rtr_req.rtr_label_flags = 0;
+        rt.rtr_req.rtr_marker_size = 0;
+
+        nh = vr_inet_route_lookup(vrf, &rt, NULL);
+        if (!nh || nh->nh_type ==  NH_DISCARD)
+            goto unhandled;
+
+        if (rt.rtr_req.rtr_label_flags & VR_RT_HOSTED_FLAG) {
+            eth = (struct vr_eth *)pkt_data(pkt);
+            VR_MAC_COPY(eth->eth_dmac, eth->eth_smac);
+            VR_MAC_COPY(eth->eth_smac, vif->vif_mac);
+            arp->arp_op = htons(VR_ARP_OP_REPLY);
+            VR_MAC_COPY(arp->arp_dha, arp->arp_sha);
+            VR_MAC_COPY(arp->arp_sha, vif->vif_mac);
+            arp->arp_dpa = arp->arp_spa;
+            arp->arp_spa = rt_prefix;
+            vr_bridge_input(vrouter_get(0), vrf, pkt, NULL);
+            return 1;
+        }
     }
 
 unhandled:

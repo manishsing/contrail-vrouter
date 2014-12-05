@@ -24,8 +24,7 @@ unsigned int vr_virtual_input(unsigned short, struct vr_interface *,
                               struct vr_packet *, unsigned short);
 unsigned int vr_fabric_input(struct vr_interface *, struct vr_packet *,
                              unsigned short);
-int vr_arp_input(unsigned short, struct vr_packet *,
-        struct vr_forwarding_md *, bool);
+int vr_arp_input(unsigned short, struct vr_packet *, struct vr_forwarding_md *);
 int vr_trap(struct vr_packet *, unsigned short ,
         unsigned short , void *);
 int vr_l3_input(unsigned short , struct vr_packet *,

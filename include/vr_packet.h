@@ -124,7 +124,6 @@
 #define PKT_ARP_FLOOD           0x03
 #define PKT_ARP_TRAP_XCONNECT   0x04
 #define PKT_ARP_TRAP            0x05
-#define PKT_ARP_DONT_PROCESS    0x06
 
 
 /* packet drop reasons */
