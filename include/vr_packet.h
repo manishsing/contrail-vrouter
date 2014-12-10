@@ -374,7 +374,7 @@ struct vr_ip6 {
 #define MCAST_IP                        (0xE0000000)
 #define MCAST_IP_MASK                   (0xF0000000)
 #define IS_BMCAST_IP(ip) \
-            (((ntohl(ip) & MCAST_IP_MASK) == MCAST_IP) || (ip == 0xFFFFFFFF)) 
+            (((ntohl(ip) & MCAST_IP_MASK) == MCAST_IP) || (ip == 0xFFFFFFFF))
 
 static inline bool
 vr_ip_is_ip6(struct vr_ip *iph)
